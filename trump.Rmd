@@ -1,0 +1,466 @@
+---
+title: "SeniorProject"
+author: "Adam Gonzalez"
+date: "2/18/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library("reticulate")
+library("scales")
+library("dplyr")
+library("ggplot2")
+library("wordcloud")
+library("ROAuth")
+library(twitteR)
+library(RColorBrewer)
+library("tm")
+library(tidytext)
+library(textdata)
+library(tidyverse)
+library(forestmangr)
+library(syuzhet)
+library(lubridate)
+library(sentimentr)
+library(ggpubr)
+```
+
+
+```{r include=FALSE}
+jobApproval <- read_csv("https://projects.fivethirtyeight.com/trump-approval-data/approval_polllist.csv")
+peopleApprovalRating <- read_csv("https://projects.fivethirtyeight.com/trump-approval-data/approval_topline.csv")
+
+jobApproval$startdate <- mdy(jobApproval$startdate)
+jobApproval$enddate <- mdy(jobApproval$enddate)
+peopleApprovalRating$modeldate <- mdy(peopleApprovalRating$modeldate)
+```
+
+
+
+
+# creating authentication for twitter to use it for project of donald trump sentiment analysis
+```{r include=FALSE}
+consumer_key <- "e001iJEIoVhP1wMLBLOErWVHJ"
+consumer_secret <- "WMYapqxKuZWVdreZUYgj6QFbB1584msT306TcfJarFW44zJjPx"
+access_token <- "1051722606531866624-aEDX37I61xvG15sLuT58LjpVNH9qmH"
+access_secret <- "W34RkrbvPhW2QN7d9qROmhrUnXBv2bihMhTMr1krockHQ"
+setup_twitter_oauth(consumer_key, consumer_secret, access_token, access_secret)
+```
+* Above steps allow me to setup into twitter api and authenticate it so that i can retrive tweets from users
+
+# creating a usertimeline to grab a certain number of tweets by user for a test sample
+```{r include=FALSE}
+N <- 3200
+name <- "realDonaldTrump"
+tw = userTimeline(name, n = N, includeRts = TRUE)
+df = twListToDF(tw)
+```
+
+# Next i am creating a graph of what device is used when tweeting
+```{r}
+df$statusSource <- gsub("<a href=\"http://twitter.com/download/iphone\" rel=\"nofollow\">","", df$statusSource)
+df$statusSource <- gsub("</a>", "", df$statusSource)
+df$statusSource <- gsub("<a href=\"https://studio.twitter.com\" rel=\"nofollow\">", "", df$statusSource)
+df$statusSource <- gsub("</a>", "", df$statusSource)
+ggplot(df, aes(x=statusSource), fill=c(statusSource)) + geom_bar(aes(fill=statusSource),colour="black" ,width=.4) + labs(title="Devices Used For Tweets") + xlab(label="Device Used For Tweeting") + ylab(label="Tweet Count") + geom_text(stat='count',aes(label=..count..),vjust=-1) + ylim(c(0, 3500))
+```
+
+# Days Most Tweeted
+```{r}
+week <- c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+weekTweets <- as.data.frame(table(weekdays(df[,'created']))[c('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')])
+weekDays <- ggplot(weekTweets, aes(Var1, Freq)) + geom_bar(stat="identity", aes(fill=week), colour='black', width=.7) + labs(title="Most Tweeted Day") + xlab(label="WeekDay") + ylab(label="Amount Of Tweets For Day") + geom_text(aes(label=Freq), vjust=-1) + ylim(0, 1000)
+weekDays
+```
+
+
+# types of Tweets
+```{r}
+trumpTweets <- df[df$isRetweet==FALSE, ]
+trumpTweets <- subset(trumpTweets, is.na(trumpTweets$replyToSID))
+trumpTweets <- trumpTweets %>%
+  arrange(-favoriteCount)
+
+trumpTweets$created <- as.Date(trumpTweets$created)
+
+trumpTweets <- trumpTweets %>%
+  arrange(-retweetCount)
+
+trumpRetweets <- df[df$isRetweet == TRUE, ]
+
+trumpReplies <- subset(df, !is.na(df$replyToSID))
+
+data <- data.frame(category=c("Self Tweet", "Retweets", "Replies"), count=c(2856, 192, 120))
+
+data$fraction = data$count / sum(data$count)
+
+data$percentage <- data$count / sum(data$count) * 100
+
+data$ymax <- cumsum(data$fraction)
+
+data$ymin <- c(0, head(data$ymax, n=-1))
+
+data <- round_df(data, 2)
+
+tweet_type <- paste(data$category, data$percentage, "%")
+
+ggplot(data, aes(ymax=ymax, ymin=ymin, xmax=4, xmin=3, fill=tweet_type))+
+  geom_rect() +
+  coord_polar(theta="y") +
+  xlim(c(2,4)) +
+  theme_void() + 
+  theme(legend.position = "right")
+```
+
+
+
+
+# Words Most Used
+```{r}
+
+trumpTweets$text <- gsub("htps\\S*", "", trumpTweets$text)
+
+trumpTweets$text <- gsub("@\\S*", "", trumpTweets$text)
+
+trumpTweets$text <- gsub("amp", "", trumpTweets$text)
+
+trumpTweets$text <- gsub("[\r\n]", "", trumpTweets$text)
+
+trumpTweets$text <- gsub("[[:punct:]]", "", trumpTweets$text)
+
+
+tweets <- trumpTweets %>%
+  select(text) %>%
+  unnest_tokens(word, text)
+
+
+tweets <- tweets %>%
+  anti_join(stop_words)
+
+tweets %>%
+  count(word, sort = TRUE) %>%
+  top_n(15) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(x = word, y = n)) +
+  geom_col() + 
+  xlab(NULL) + 
+  coord_flip() + 
+  labs(y = "Count", x = "Unique Words", title = "Most Frequently Used Words By Donald Trump")
+```
+
+
+
+# sentiment summary of Donald Trumps Tweets Overall
+```{r}
+tweets <- iconv(tweets, from="UTF-8", to="ASCII", sub="")
+
+tweets <- gsub("(RT|Via)((?:\\b\\w*@\\w+)+)", "", tweets)
+
+tweets <- gsub("@\\w+", "", tweets)
+
+sentiment_temp <- get_nrc_sentiment((tweets))
+
+sentimentScore <- data.frame(colSums(sentiment_temp[,]))
+
+names(sentimentScore) <- "Score"
+
+sentimentScore <- cbind("sentiment" = rownames(sentimentScore), sentimentScore)
+
+rownames(sentimentScore) <- NULL
+
+ggplot(sentimentScore, aes(sentiment, Score)) +
+  geom_bar(aes(fill=sentiment), stat = "identity") +
+  theme(legend.position = "none") + xlab("Sentiment Types") + ylab("Scores") + theme_minimal()
+  
+sentiment = sentiment_by(trumpTweets$text)
+
+overallplot <- ggplot(sentiment, aes(ave_sentiment)) + geom_histogram(bins = 30)
+```
+
+
+
+# Month 1 sentiments
+```{r message = FALSE}
+# since the tweet count is only allowed 3200 the oldest tweet date is 1/18/2020 so i will create 5 months to get sentiment values and comapre across the dates
+
+month1 <- subset(trumpTweets, (created <= "2020-02-17"))
+
+
+month1$text <- gsub("htps\\S*", "", month1$text)
+
+month1$text <- gsub("@\\S*", "", month1$text)
+
+month1$text <- gsub("amp", "", month1$text)
+
+month1$text <- gsub("[\r\n]", "", month1$text)
+
+month1$text <- gsub("[[:punct:]]", "", month1$text)
+
+
+tweetsForMonth1 <- month1 %>%
+  select(text) %>%
+  unnest_tokens(word, text)
+
+
+tweetsForMonth1 <- tweetsForMonth1 %>%
+  anti_join(stop_words)
+
+tweetsForMonth1 %>%
+  count(word, sort = TRUE) %>%
+  top_n(15) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(x = word, y = n)) +
+  geom_col() + 
+  xlab(NULL) + 
+  coord_flip() + 
+  labs(y = "Count", x = "Unique Words", title = "Most Frequently Used Words By Donald Trump")
+
+
+tweetsForMonth1 <- iconv(tweetsForMonth1, from="UTF-8", to="ASCII", sub="")
+
+tweetsForMonth1 <- gsub("(RT|Via)((?:\\b\\w*@\\w+)+)", "", tweetsForMonth1)
+
+tweetsForMonth1 <- gsub("@\\w+", "", tweetsForMonth1)
+
+sentiment_temp_for_month1 <- get_nrc_sentiment((tweetsForMonth1))
+
+sentimentScoreForMonth1 <- data.frame(colSums(sentiment_temp_for_month1[,]))
+
+names(sentimentScoreForMonth1) <- "Score"
+
+sentimentScoreForMonth1 <- cbind("sentiment" = rownames(sentimentScoreForMonth1), sentimentScoreForMonth1)
+
+rownames(sentimentScoreForMonth1) <- NULL
+
+month1sentiment <- ggplot(sentimentScoreForMonth1, aes(sentiment, Score)) +
+  geom_bar(aes(fill=sentiment), stat = "identity") +
+  theme(legend.position = "none") + xlab("Sentiment Types") + ylab("Scores") + theme_minimal()
+
+jobApprovalForMonth1 <- subset(jobApproval, (startdate >= "2020-01-18" & enddate <= "2020-02-17"))
+peopleApprovalRatingForMonth1 <- subset(peopleApprovalRating, (modeldate >= "2020-01-18" & modeldate <= "2020-02-17"))
+avgPeopleApprovalRatingForMonth1 <- sum(peopleApprovalRatingForMonth1$approve_estimate) / count(peopleApprovalRatingForMonth1)
+avgJobApprovalRatingForMonth1 <- sum(jobApprovalForMonth1$adjusted_approve) / count(jobApprovalForMonth1)
+cat("Positive Score = ", sentimentScoreForMonth1$Score[10]) 
+cat("\nNegative Score = ", sentimentScoreForMonth1$Score[9])
+cat("\nAverage Approval Rating (1/18 - 2/17/2020): ", as.double(avgPeopleApprovalRatingForMonth1), "%")
+cat("\nAverage Job Approval (1/18 - 2/17/2020): ", as.double(avgJobApprovalRatingForMonth1), "%\n")
+
+sentimentForMonth1 = sentiment_by(month1$text)
+
+month1plot <- ggplot(sentimentForMonth1, aes(ave_sentiment)) + geom_histogram(bins=25)
+```
+
+# Month 2 sentiments
+```{r message = FALSE}
+month2 <- subset(trumpTweets, (created <= "2020-03-17" & created >= "2020-02-18"))
+
+month2$text <- gsub("htps\\S*", "", month2$text)
+
+month2$text <- gsub("@\\S*", "", month2$text)
+
+month2$text <- gsub("amp", "", month2$text)
+
+month2$text <- gsub("[\r\n]", "", month2$text)
+
+month2$text <- gsub("[[:punct:]]", "", month2$text)
+
+
+tweetsForMonth2 <- month2 %>%
+  select(text) %>%
+  unnest_tokens(word, text)
+
+
+tweetsForMonth2 <- tweetsForMonth2 %>%
+  anti_join(stop_words)
+
+tweetsForMonth2 %>%
+  count(word, sort = TRUE) %>%
+  top_n(15) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(x = word, y = n)) +
+  geom_col() + 
+  xlab(NULL) + 
+  coord_flip() + 
+  labs(y = "Count", x = "Unique Words", title = "Most Frequently Used Words By Donald Trump")
+
+
+tweetsForMonth2 <- iconv(tweetsForMonth2, from="UTF-8", to="ASCII", sub="")
+
+tweetsForMonth2 <- gsub("(RT|Via)((?:\\b\\w*@\\w+)+)", "", tweetsForMonth2)
+
+tweetsForMonth2 <- gsub("@\\w+", "", tweetsForMonth2)
+
+sentiment_temp_for_month2 <- get_nrc_sentiment((tweetsForMonth2))
+
+sentimentScoreForMonth2 <- data.frame(colSums(sentiment_temp_for_month2[,]))
+
+names(sentimentScoreForMonth2) <- "Score"
+
+sentimentScoreForMonth2 <- cbind("sentiment" = rownames(sentimentScoreForMonth2), sentimentScoreForMonth2)
+
+rownames(sentimentScoreForMonth2) <- NULL
+
+month2sentiment <- ggplot(sentimentScoreForMonth2, aes(sentiment, Score)) +
+  geom_bar(aes(fill=sentiment), stat = "identity") +
+  theme(legend.position = "none") + xlab("Sentiment Types") + ylab("Scores") + theme_minimal()
+
+jobApprovalForMonth2 <- subset(jobApproval, (startdate >= "2020-02-18" & enddate <= "2020-03-17"))
+peopleApprovalRatingForMonth2 <- subset(peopleApprovalRating, (modeldate >= "2020-02-18" & modeldate <= "2020-03-17"))
+avgPeopleApprovalRatingForMonth2 <- sum(peopleApprovalRatingForMonth2$approve_estimate) / count(peopleApprovalRatingForMonth2)
+avgJobApprovalRatingForMonth2 <- sum(jobApprovalForMonth2$adjusted_approve) / count(jobApprovalForMonth2)
+cat("Positive Score = ", sentimentScoreForMonth2$Score[10]) 
+cat("\nNegative Score = ", sentimentScoreForMonth2$Score[9])
+cat("\nAverage Approval Rating (2/18 - 3/17/2020): ", as.double(avgPeopleApprovalRatingForMonth2), "%")
+cat("\nAverage Job Approval (2/18 - 3/17/2020): ", as.double(avgJobApprovalRatingForMonth2), "%\n")
+
+sentimentForMonth2 = sentiment_by(month2$text)
+
+month2plot <- ggplot(sentimentForMonth2, aes(ave_sentiment)) + geom_histogram(bins=30)
+```
+
+
+# Month 3 sentiments
+```{r message = FALSE}
+month3 <- subset(trumpTweets, (created <= "2020-04-17" & created >= "2020-03-18"))
+
+month3$text <- gsub("htps\\S*", "", month3$text)
+
+month3$text <- gsub("@\\S*", "", month3$text)
+
+month3$text <- gsub("amp", "", month3$text)
+
+month3$text <- gsub("[\r\n]", "", month3$text)
+
+month3$text <- gsub("[[:punct:]]", "", month3$text)
+
+tweetsForMonth3 <- month3 %>%
+  select(text) %>%
+  unnest_tokens(word, text)
+
+
+tweetsForMonth3 <- tweetsForMonth3 %>%
+  anti_join(stop_words)
+
+tweetsForMonth3 %>%
+  count(word, sort = TRUE) %>%
+  top_n(15) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(x = word, y = n)) +
+  geom_col() + 
+  xlab(NULL) + 
+  coord_flip() + 
+  labs(y = "Count", x = "Unique Words", title = "Most Frequently Used Words By Donald Trump")
+
+tweetsForMonth3 <- iconv(tweetsForMonth3, from="UTF-8", to="ASCII", sub="")
+
+tweetsForMonth3 <- gsub("(RT|Via)((?:\\b\\w*@\\w+)+)", "", tweetsForMonth3)
+
+tweetsForMonth3 <- gsub("@\\w+", "", tweetsForMonth3)
+
+sentiment_temp_for_month3 <- get_nrc_sentiment((tweetsForMonth3))
+
+sentimentScoreForMonth3 <- data.frame(colSums(sentiment_temp_for_month3[,]))
+
+names(sentimentScoreForMonth3) <- "Score"
+
+sentimentScoreForMonth3 <- cbind("sentiment" = rownames(sentimentScoreForMonth3), sentimentScoreForMonth3)
+
+rownames(sentimentScoreForMonth3) <- NULL
+
+month3sentiment <- ggplot(sentimentScoreForMonth3, aes(sentiment, Score)) +
+  geom_bar(aes(fill=sentiment), stat = "identity") +
+  theme(legend.position = "none") + xlab("Sentiment Types") + ylab("Scores") + theme_minimal()
+
+jobApprovalForMonth3 <- subset(jobApproval, (startdate >= "2020-03-18" & enddate <= "2020-04-17"))
+peopleApprovalRatingForMonth3 <- subset(peopleApprovalRating, (modeldate >= "2020-03-18" & modeldate <= "2020-04-17"))
+avgPeopleApprovalRatingForMonth3 <- sum(peopleApprovalRatingForMonth3$approve_estimate) / count(peopleApprovalRatingForMonth3)
+avgJobApprovalRatingForMonth3 <- sum(jobApprovalForMonth3$adjusted_approve) / count(jobApprovalForMonth3)
+cat("Positive Score = ", sentimentScoreForMonth3$Score[10]) 
+cat("\nNegative Score = ", sentimentScoreForMonth3$Score[9])
+cat("\nAverage Approval Rating (3/18 - 4/17/2020): ", as.double(avgPeopleApprovalRatingForMonth3), "%")
+cat("\nAverage Job Approval (3/18 - 4/17/2020): ", as.double(avgJobApprovalRatingForMonth3), "%\n")
+
+sentimentForMonth3 = sentiment_by(month3$text)
+
+month3plot <- ggplot(sentimentForMonth3, aes(ave_sentiment)) + geom_histogram(bins=25)
+```
+
+
+# Month 4 sentiments
+```{r message = FALSE}
+month4 <- subset(trumpTweets, (created <= as.Date(Sys.time()) & created >= "2020-04-19"))
+
+month4$text <- gsub("htps\\S*", "", month4$text)
+
+month4$text <- gsub("@\\S*", "", month4$text)
+
+month4$text <- gsub("amp", "", month4$text)
+
+month4$text <- gsub("[\r\n]", "", month4$text)
+
+month4$text <- gsub("[[:punct:]]", "", month4$text)
+
+
+tweetsForMonth4 <- month4 %>%
+  select(text) %>%
+  unnest_tokens(word, text)
+
+
+tweetsForMonth4 <- tweetsForMonth4 %>%
+  anti_join(stop_words)
+
+tweetsForMonth4 %>%
+  count(word, sort = TRUE) %>%
+  top_n(15) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(x = word, y = n)) +
+  geom_col() + 
+  xlab(NULL) + 
+  coord_flip() + 
+  labs(y = "Count", x = "Unique Words", title = "Most Frequently Used Words By Donald Trump")
+
+tweetsForMonth4 <- iconv(tweetsForMonth4, from="UTF-8", to="ASCII", sub="")
+
+tweetsForMonth4 <- gsub("(RT|Via)((?:\\b\\w*@\\w+)+)", "", tweetsForMonth4)
+
+tweetsForMonth4 <- gsub("@\\w+", "", tweetsForMonth4)
+
+sentiment_temp_for_month4 <- get_nrc_sentiment((tweetsForMonth4))
+
+sentimentScoreForMonth4 <- data.frame(colSums(sentiment_temp_for_month4[,]))
+
+names(sentimentScoreForMonth4) <- "Score"
+
+sentimentScoreForMonth4 <- cbind("sentiment" = rownames(sentimentScoreForMonth4), sentimentScoreForMonth4)
+
+month4sentiment <- ggplot(sentimentScoreForMonth4, aes(sentiment, Score)) +
+  geom_bar(aes(fill=sentiment), stat = "identity") +
+  theme(legend.position = "none") + xlab("Sentiment Types") + ylab("Scores") + theme_minimal()
+
+jobApprovalForMonth4 <- subset(jobApproval, (startdate >= "2020-04-18" & enddate <= as.Date(Sys.time())))
+peopleApprovalRatingForMonth4 <- subset(peopleApprovalRating, (modeldate >= "2020-03-18" & modeldate <= as.Date(Sys.time())))
+avgPeopleApprovalRatingForMonth4 <- sum(peopleApprovalRatingForMonth4$approve_estimate) / count(peopleApprovalRatingForMonth4)
+avgJobApprovalRatingForMonth4 <- sum(jobApprovalForMonth4$adjusted_approve) / count(jobApprovalForMonth4)
+print(paste0("Positive Score = ", sentimentScoreForMonth4$Score[10]))
+print(paste0("Negative Score = ", sentimentScoreForMonth4$Score[9]))
+cat("Average Approval Rating (4/18 - 5/03/2020): ", as.double(avgPeopleApprovalRatingForMonth4), "%")
+cat("Average Job Approval ( 4/18 - 5/03/2020): ", as.double(avgJobApprovalRatingForMonth4), "%\n")
+
+sentimentForMonth4 = sentiment_by(month4$text)
+
+month4plot <- ggplot(sentimentForMonth4, aes(ave_sentiment)) + geom_histogram(bins=25)
+```
+
+# Graphs for months and sentiment graphs for the months
+```{r}
+ggarrange(month1plot, month2plot, month3plot, month4plot + rremove("x.text"), labels = c("month1", "month2", "month3", "month4"), ncol = 2, nrow = 2)
+```
+```{r}
+ggarrange(month1sentiment, month2sentiment, month3sentiment, month4sentiment + rremove("x.text"), labels = c("sentiment"), ncol = 1, nrow = 1)
+```
+
+
+
+
+
+
